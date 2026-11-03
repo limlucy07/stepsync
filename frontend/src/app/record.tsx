@@ -10,6 +10,7 @@ import { Linking, Platform, Pressable, StyleSheet, Text, View } from 'react-nati
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { PickedVideo } from '@/api/types';
+import { lessonStepIndex } from '@/data/lesson';
 import { useSession } from '@/state/session';
 import { colors } from '@/theme';
 
@@ -21,23 +22,30 @@ type Phase = 'idle' | 'countdown' | 'recording';
 export default function RecordScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { slot } = useLocalSearchParams<{ slot?: string }>();
+  const { slot, step } = useLocalSearchParams<{ slot?: string; step?: string }>();
   const target = slot === 'reference' ? 'reference' : 'practice';
-  const { setReference, setPractice } = useSession();
+  const { setReference, setPractice, setStepRecording } = useSession();
 
   const [cameraPermission, requestCamera] = useCameraPermissions();
   const [micPermission, requestMic] = useMicrophonePermissions();
 
   const camera = useRef<CameraView>(null);
   const cancelCountdown = useRef(false);
+  const discardRecording = useRef(false);
   const startedAt = useRef(0);
 
-  const [facing, setFacing] = useState<CameraType>('back');
+  const [facing, setFacing] = useState<CameraType>(step ? 'front' : 'back');
   const [cameraReady, setCameraReady] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [count, setCount] = useState(COUNTDOWN_SECONDS);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    discardRecording.current = true;
+    cancelCountdown.current = true;
+    camera.current?.stopRecording();
+  }, []);
 
   // Tick the on-screen timer while recording.
   useEffect(() => {
@@ -82,6 +90,7 @@ export default function RecordScreen() {
   async function startCountdown() {
     setError(null);
     cancelCountdown.current = false;
+    discardRecording.current = false;
     setPhase('countdown');
     for (let n = COUNTDOWN_SECONDS; n > 0; n--) {
       setCount(n);
@@ -101,10 +110,12 @@ export default function RecordScreen() {
         ...(Platform.OS === 'ios' ? { codec: 'avc1' as const } : {}),
       });
       const durationMs = Date.now() - startedAt.current;
+      if (discardRecording.current) return;
       if (!video?.uri) return setPhase('idle');
 
       const picked = toPickedVideo(video.uri, target, durationMs);
-      if (target === 'reference') setReference(picked);
+      if (step && target === 'practice') setStepRecording(lessonStepIndex(step), picked);
+      else if (target === 'reference') setReference(picked);
       else setPractice(picked);
       router.back();
     } catch (e) {
@@ -123,7 +134,7 @@ export default function RecordScreen() {
     <View style={styles.fill}>
       <CameraView
         ref={camera}
-        style={StyleSheet.absoluteFill}
+        style={step ? styles.stepCamera : StyleSheet.absoluteFill}
         mode="video"
         facing={facing}
         videoQuality="720p"
@@ -132,10 +143,13 @@ export default function RecordScreen() {
         onMountError={(e) => setError(e.message)}
       />
 
+      {step && <View testID="step-clip-placeholder" style={styles.stepReference}><Text style={styles.hint}>Step clip coming soon</Text></View>}
+
       <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
         <RoundButton
           label="✕"
           onPress={() => {
+            discardRecording.current = true;
             cancelCountdown.current = true;
             camera.current?.stopRecording();
             router.back();
@@ -155,7 +169,7 @@ export default function RecordScreen() {
       </View>
 
       {phase === 'countdown' && (
-        <View style={styles.center} pointerEvents="none">
+        <View style={[styles.center, step ? { top: '45%' } : undefined]} pointerEvents="none">
           <Text style={styles.countdown}>{count}</Text>
         </View>
       )}
@@ -254,6 +268,8 @@ function formatClock(seconds: number): string {
 
 const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: '#000' },
+  stepReference: { position: 'absolute', top: 0, left: 0, right: 0, height: '45%', backgroundColor: '#000', borderBottomWidth: 1, borderBottomColor: '#444', alignItems: 'center', justifyContent: 'center' },
+  stepCamera: { position: 'absolute', top: '45%', bottom: 0, left: 0, right: 0 },
   topBar: {
     position: 'absolute',
     top: 0,
