@@ -126,6 +126,33 @@ def segment_steps(frames: list[dict]) -> list[dict]:
     peaks = sorted({int(round(b * fps)) for b in boundaries} - {0, len(span) - 1})
     cuts = [0, *[p for p in peaks if 0 < p < len(span) - 1], len(span) - 1]
 
+    return _build_steps(span, cuts)
+
+
+def steps_from_ranges(frames: list[dict], ranges_ms: list[tuple[int, int]]) -> list[dict]:
+    """Rebuild steps from boundaries a person edited in the app, with fresh pace and focus labels.
+
+    ranges_ms are back-to-back (start_ms, end_ms) pairs; each edge snaps to the nearest frame.
+    """
+    if not frames or not ranges_ms:
+        return []
+    times = [f["timestamp_ms"] for f in frames]
+
+    def nearest(ms: int) -> int:
+        return min(range(len(frames)), key=lambda i: abs(times[i] - ms))
+
+    cuts = [nearest(ranges_ms[0][0])] + [nearest(end) for _, end in ranges_ms]
+    for a, b in zip(cuts, cuts[1:]):
+        if b <= a:
+            raise ValueError("Steps are too close together; each step needs at least one frame.")
+    first, last = cuts[0], cuts[-1]
+    span = frames[first: last + 1]
+    return _build_steps(span, [c - first for c in cuts])
+
+
+def _build_steps(span: list[dict], cuts: list[int]) -> list[dict]:
+    """Turn cut positions within span into step dicts with pace and body-part labels."""
+    times = [f["timestamp_ms"] for f in span]
     energies = [f["motion_energy"] for f in span if f.get("motion_energy") is not None]
     overall = (sum(energies) / len(energies)) if energies else 0.0
     baseline = _part_speeds(span)

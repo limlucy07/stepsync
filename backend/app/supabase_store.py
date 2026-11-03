@@ -43,6 +43,17 @@ class SupabaseError(Exception):
     """Saving to Supabase failed; the message is safe to show to the app user."""
 
 
+class StepsChangedError(SupabaseError):
+    """The edit was made against steps that no longer match what's saved."""
+
+
+class StepInUseError(SupabaseError):
+    """A step that would be deleted still has practice data pointing at it."""
+
+
+TEMP_STEP_ORDER = 100000
+
+
 def _num(value):
     if value is None or value == "":
         return None
@@ -209,6 +220,114 @@ class SupabaseStore:
             logger.exception("Supabase request failed")
             raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
 
+    def get_dance(self, dance_id: str) -> dict | None:
+        """The dance's owner and saved video name, or None if it doesn't exist."""
+        try:
+            response = self.client.get(
+                f"{self.config.url}/rest/v1/dances",
+                params={"id": f"eq.{dance_id}", "select": "id,owner_id,video_path"},
+                headers=self._headers(),
+            )
+        except httpx.HTTPError as error:
+            logger.exception("Supabase request failed")
+            raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+        if response.status_code >= 300:
+            self._check(response, "dances")
+        rows = response.json()
+        return rows[0] if rows else None
+
+    def update_steps(self, dance_id: str, steps: list[dict], frames: list[dict],
+                     sources: list[int | None] | None = None, saved_count: int | None = None) -> None:
+        """Save edited steps: moved, split or merged.
+
+        sources[i] is the position (0-based, in step_order) of the saved step that steps[i] continues, or None
+        for a new step (the right half of a split). A step that continues a saved one keeps its id, so practice
+        data pointing at it keeps working. Saved steps no step continues (merged away) are deleted; if practice
+        data still points at one, nothing is deleted and StepInUseError is raised.
+        With no sources, steps map one-to-one onto the saved steps.
+        """
+        rest, headers = f"{self.config.url}/rest/v1", self._headers()
+        try:
+            response = self.client.get(
+                f"{rest}/steps", params={"dance_id": f"eq.{dance_id}", "select": "id,step_order", "order": "step_order"},
+                headers=headers,
+            )
+            self._check(response, "steps")
+            existing = response.json()
+            if sources is None:
+                if len(existing) != len(steps):
+                    raise StepsChangedError(
+                        f"This dance has {len(existing)} steps in Supabase but {len(steps)} were sent.")
+                sources = list(range(len(steps)))
+            if saved_count is not None and saved_count != len(existing):
+                raise StepsChangedError("The steps changed since you opened this dance. Reload it and try again.")
+            kept = [s for s in sources if s is not None]
+            if any(s < 0 or s >= len(existing) for s in kept) or any(b <= a for a, b in zip(kept, kept[1:])):
+                raise StepsChangedError("The edited steps don't match the saved ones. Reload the dance and try again.")
+
+            removed = [row["id"] for i, row in enumerate(existing) if i not in set(kept)]
+            if removed:
+                self._delete_steps(rest, headers, removed)
+
+            # step_order may be unique per dance, so park moved steps on temporary numbers before the
+            # new steps take their final ones.
+            final_order = {sources[i]: i + 1 for i in range(len(steps)) if sources[i] is not None}
+            for source, order in final_order.items():
+                if existing[source]["step_order"] != order:
+                    self._check(self.client.patch(f"{rest}/steps", params={"id": f"eq.{existing[source]['id']}"},
+                                                  json={"step_order": TEMP_STEP_ORDER + order}, headers=headers), "steps")
+            step_ids: list[str] = [""] * len(steps)
+            new = [i for i, s in enumerate(sources) if s is None]
+            if new:
+                rows = [{**_step_row(dance_id, steps[i]), "step_order": i + 1} for i in new]
+                response = self.client.post(f"{rest}/steps", json=rows,
+                                            headers={**headers, "Prefer": "return=representation"})
+                self._check(response, "steps")
+                by_order = {row["step_order"]: row["id"] for row in response.json()}
+                for i in new:
+                    step_ids[i] = by_order[i + 1]
+            for i, source in enumerate(sources):
+                if source is None:
+                    continue
+                step_ids[i] = existing[source]["id"]
+                update = {k: v for k, v in _step_row(dance_id, steps[i]).items()
+                          if k in ("step_order", "name", "start_ms", "end_ms", "description")}
+                update["step_order"] = i + 1
+                self._check(self.client.patch(f"{rest}/steps", params={"id": f"eq.{step_ids[i]}"}, json=update,
+                                              headers=headers), "steps")
+
+            old_ids = [existing[s]["id"] for s in kept]
+            if old_ids:
+                self._check(self.client.delete(f"{rest}/keyframes", params={"step_id": f"in.({','.join(old_ids)})"},
+                                               headers=headers), "keyframes")
+            keyframes = [k for step_id, step in zip(step_ids, steps) for k in _keyframe_rows(step_id, step, frames)]
+            if keyframes:
+                self._check(self.client.post(f"{rest}/keyframes", json=keyframes, headers=headers), "keyframes")
+        except httpx.HTTPError as error:
+            logger.exception("Supabase request failed")
+            raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+
+    def _delete_steps(self, rest: str, headers: dict, step_ids: list[str]):
+        """Delete merged-away steps and their keyframes. If anything else (practice data) still points at
+        one of them, put the keyframes back and raise StepInUseError, so nothing is lost."""
+        ids = f"in.({','.join(step_ids)})"
+        response = self.client.get(f"{rest}/keyframes", params={"step_id": ids, "select": "*"}, headers=headers)
+        self._check(response, "keyframes")
+        backup = response.json()
+        self._check(self.client.delete(f"{rest}/keyframes", params={"step_id": ids}, headers=headers), "keyframes")
+        response = self.client.delete(f"{rest}/steps", params={"id": ids}, headers=headers)
+        if response.status_code < 300:
+            return
+        if backup:
+            restored = self.client.post(f"{rest}/keyframes", json=backup, headers=headers)
+            if restored.status_code >= 300:
+                logger.error("Could not restore keyframes: %s %s", restored.status_code, restored.text[:500])
+        if "23503" in response.text:
+            raise StepInUseError(
+                "One of the steps you merged already has practice data, so it can't be removed. "
+                "Move the cuts instead, or clear that practice data first.")
+        self._check(response, "steps")
+
     def _remove(self, dance_id: str, step_ids: list[str]):
         """Undo a partial save, children first (works whether or not the foreign keys cascade)."""
         rest, headers = f"{self.config.url}/rest/v1", self._headers()
@@ -234,7 +353,7 @@ class SupabaseStore:
             hint = " The user has no row in profiles; every account needs one before it can own dances."
         elif response.status_code in (401, 403):
             hint = " Check STEPSYNC_SUPABASE_SECRET_KEY (use the secret/service_role key)."
-        raise SupabaseError(f"Supabase rejected the {table} insert ({response.status_code}).{hint}{_reason(response)}")
+        raise SupabaseError(f"Supabase rejected the {table} request ({response.status_code}).{hint}{_reason(response)}")
 
 
 def _reason(response: httpx.Response) -> str:

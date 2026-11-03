@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import { supabase, supabaseConfigured } from '@/lib/supabase';
 
 import { mockAnalyze } from './mock';
-import type { AnalysisResult, PickedVideo, YouTubeImportResponse } from './types';
+import type { AnalysisResult, DanceStep, PickedVideo, YouTubeImportResponse } from './types';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
@@ -139,4 +139,33 @@ async function appendVideo(body: FormData, field: string, video: PickedVideo) {
 /** URL the video player can stream a backend-saved video from (GET /videos/{filename}). */
 export function savedVideoUrl(filename: string): string | null {
   return API_URL ? `${API_URL}/videos/${encodeURIComponent(filename)}` : null;
+}
+
+/**
+ * Save steps edited in the app: cuts moved, steps split or merged (PUT /dances/{id}/steps).
+ * Returns the steps with fresh pace and body-part labels.
+ */
+export async function updateSteps(
+  danceId: string,
+  steps: { start_ms: number; end_ms: number; source: number | null }[],
+  savedCount: number,
+): Promise<DanceStep[]> {
+  if (!API_URL) throw new Error('Connect the backend (EXPO_PUBLIC_API_URL) to save steps.');
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/dances/${encodeURIComponent(danceId)}/steps`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+      // source: which saved step (by position) each step continues, so it keeps its id; null for a new step.
+      body: JSON.stringify({
+        steps: steps.map(({ start_ms, end_ms, source }) => ({ start_ms, end_ms, source })),
+        saved_count: savedCount,
+      }),
+    });
+  } catch {
+    throw new Error(unreachable());
+  }
+  const text = await response.text();
+  if (!response.ok) throw new Error(errorMessage(text, response.status));
+  return (JSON.parse(text) as { steps: DanceStep[] }).steps;
 }

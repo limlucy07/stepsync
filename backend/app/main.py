@@ -20,8 +20,8 @@ from .pose_processing import PoseArtifacts, run_pose_extraction
 from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
-from .segmentation import segment_steps
-from .supabase_store import SupabaseError, SupabaseStore, add_motion_features, load_pose_frames
+from .segmentation import segment_steps, steps_from_ranges
+from .supabase_store import StepInUseError, StepsChangedError, SupabaseError, SupabaseStore, add_motion_features, load_pose_frames
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,23 @@ class StepResponse(BaseModel):
     end_ms: int
     intensity: str
     focus: list[str]
+
+
+class StepRange(BaseModel):
+    start_ms: int
+    end_ms: int
+    # Position (0-based) of the saved step this one continues, keeping its id; null for a new step
+    # (the right half of a split). Leave it out on every step to map steps one-to-one.
+    source: int | None = None
+
+
+class StepsUpdate(BaseModel):
+    steps: list[StepRange]
+    saved_count: int | None = None  # how many steps the app thinks are saved, to catch stale edits
+
+
+MIN_EDITED_STEP_MS = 200
+MAX_EDITED_STEPS = 200
 
 
 class UploadResponse(BaseModel):
@@ -108,9 +125,9 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def request_error_handler(request, error):
-        return JSONResponse(status_code=422, content={"error": {
-            "code": "invalid_request", "message": "Send a JSON object with a nonempty string in the 'url' field."
-        }})
+        message = ("Send a JSON object with a nonempty string in the 'url' field."
+                   if request.url.path == "/reference-videos" else "The request body doesn't have the expected fields.")
+        return JSONResponse(status_code=422, content={"error": {"code": "invalid_request", "message": message}})
 
     @app.post("/reference-videos", response_model=UploadResponse, status_code=200)
     def upload_video(request: YouTubeRequest, authorization: str | None = Header(default=None)):
@@ -169,6 +186,55 @@ def create_app(
         """
         path = find_saved_video(filename, settings.video_directory)
         return FileResponse(path, media_type="video/mp4")
+
+    @app.put("/dances/{dance_id}/steps")
+    def update_dance_steps(dance_id: str, body: StepsUpdate, authorization: str | None = Header(default=None)) -> dict:
+        """Save steps edited in the app: cuts moved, steps split or merged. Steps that continue a saved
+        step keep its id, so practice data pointing at them keeps working."""
+        if store is None:
+            raise HTTPException(503, "The backend isn't connected to Supabase.")
+        owner_id = None
+        if authorization and authorization.lower().startswith("bearer "):
+            owner_id = store.user_id_for_token(authorization[7:].strip())
+        if owner_id is None:
+            raise HTTPException(401, "Log in to edit steps.")
+        try:
+            dance = store.get_dance(dance_id)
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        if dance is None:
+            raise HTTPException(404, "That dance doesn't exist.")
+        if dance["owner_id"] != owner_id:
+            raise HTTPException(403, "You can only edit steps of your own dances.")
+
+        ranges = [(r.start_ms, r.end_ms) for r in body.steps]
+        if not ranges:
+            raise HTTPException(422, "Send at least one step.")
+        if len(ranges) > MAX_EDITED_STEPS:
+            raise HTTPException(422, f"A dance can have at most {MAX_EDITED_STEPS} steps.")
+        if ranges[0][0] < 0 or any(end - start < MIN_EDITED_STEP_MS for start, end in ranges):
+            raise HTTPException(422, f"Every step must be at least {MIN_EDITED_STEP_MS / 1000:g} seconds long.")
+        if any(a[1] != b[0] for a, b in zip(ranges, ranges[1:])):
+            raise HTTPException(422, "Steps must follow each other with no gaps or overlaps.")
+
+        video = find_saved_video(dance["video_path"] or "", settings.video_directory)
+        pose_csv = settings.pose_results_directory / video.stem / "pose_data.csv"
+        if not pose_csv.is_file():
+            raise HTTPException(409, "The pose data for this dance is missing on the backend. Upload it again.")
+        frames = load_pose_frames(pose_csv)
+        add_motion_features(frames)
+        try:
+            steps = steps_from_ranges(frames, ranges)
+        except ValueError as error:
+            raise HTTPException(422, str(error))
+        try:
+            sources = [r.source for r in body.steps] if any("source" in r.model_fields_set for r in body.steps) else None
+            store.update_steps(dance_id, steps, frames, sources=sources, saved_count=body.saved_count)
+        except (StepsChangedError, StepInUseError) as error:
+            raise HTTPException(409, str(error))
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        return {"steps": [{k: step[k] for k in StepResponse.model_fields} for step in steps]}
 
     @app.post("/analyze")
     def analyze(

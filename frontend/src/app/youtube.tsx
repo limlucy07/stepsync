@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 
 import { importYouTube, savedVideoUrl, usingMockApi } from '@/api/client';
-import type { PickedVideo, YouTubeImportResponse, YouTubeSource } from '@/api/types';
+import type { DanceStep, PickedVideo, YouTubeImportResponse, YouTubeSource } from '@/api/types';
 import { parseYouTubeUrl, youtubeThumbnail } from '@/api/youtube';
 import { PrimaryButton } from '@/components/primary-button';
 import { StepPlayer } from '@/components/step-player';
@@ -116,6 +116,14 @@ export default function UploadDanceScreen() {
             setLink('');
           }}
           onDone={() => router.back()}
+          onStepsSaved={(steps) =>
+            // Keep "Practice this dance" in sync with edited steps.
+            setUploaded((current) =>
+              current && current.video.youtube
+                ? { ...current, video: { ...current.video, youtube: { ...current.video.youtube, steps } } }
+                : current,
+            )
+          }
         />
       ) : (
         <>
@@ -206,11 +214,13 @@ function UploadedView({
   onPractice,
   onAnother,
   onDone,
+  onStepsSaved,
 }: {
   uploaded: Uploaded;
   onPractice: () => void;
   onAnother: () => void;
   onDone: () => void;
+  onStepsSaved: (steps: DanceStep[]) => void;
 }) {
   const saved = result.supabase_status === 'saved';
   const yt = video.youtube!;
@@ -248,6 +258,8 @@ function UploadedView({
         thumbnail={youtubeThumbnail(yt.videoId)}
         steps={steps}
         durationMs={video.durationMs}
+        danceId={saved ? result.supabase_dance_id : null}
+        onStepsSaved={onStepsSaved}
       />
 
       <PrimaryButton label="Practice this dance" onPress={onPractice} />
