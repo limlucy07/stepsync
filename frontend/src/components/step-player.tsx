@@ -1,7 +1,7 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { useEvent } from 'expo';
 import { useVideoPlayer, VideoView } from 'expo-video';
-import { useEffect, useRef, useState } from 'react';
+import { type ComponentRef, useEffect, useRef, useState } from 'react';
 import { Image, PanResponder, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { updateSteps } from '@/api/client';
@@ -258,7 +258,7 @@ export function StepPlayer({ source, thumbnail, steps: initialSteps, durationMs,
   // --- layout ----------------------------------------------------------------
 
   const [timelineWidth, setTimelineWidth] = useState(0);
-  const timelineRef = useRef<View>(null);
+  const timelineRef = useRef<ComponentRef<typeof View>>(null);
   const timelinePageX = useRef(0);
   const measureTimeline = () =>
     timelineRef.current?.measureInWindow((x, _y, width) => {
