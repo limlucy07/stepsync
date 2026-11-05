@@ -220,6 +220,40 @@ class SupabaseStore:
             logger.exception("Supabase request failed")
             raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
 
+    def list_dances(self, user_id: str) -> list[dict]:
+        """The user's own dances plus public ones, each with its step count, newest first."""
+        response = self._get("dances", {
+            "select": "*,steps(count)",
+            "or": f"(owner_id.eq.{user_id},is_public.eq.true)",
+        })
+        rows = response.json()
+        for row in rows:
+            counted = row.pop("steps", None) or [{}]
+            row["step_count"] = counted[0].get("count", 0)
+        # Sorted here rather than by PostgREST, so it works whether or not the table has created_at.
+        rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        return rows
+
+    def get_dance_with_steps(self, dance_id: str) -> tuple[dict, list[dict]] | None:
+        """The whole dance row and its steps in order, or None if it doesn't exist."""
+        rows = self._get("dances", {"id": f"eq.{dance_id}", "select": "*"}).json()
+        if not rows:
+            return None
+        steps = self._get("steps", {
+            "dance_id": f"eq.{dance_id}", "order": "step_order",
+            "select": "id,step_order,name,start_ms,end_ms,description",
+        }).json()
+        return rows[0], steps
+
+    def _get(self, table: str, params: dict) -> httpx.Response:
+        try:
+            response = self.client.get(f"{self.config.url}/rest/v1/{table}", params=params, headers=self._headers())
+        except httpx.HTTPError as error:
+            logger.exception("Supabase request failed")
+            raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+        self._check(response, table)
+        return response
+
     def get_dance(self, dance_id: str) -> dict | None:
         """The dance's owner and saved video name, or None if it doesn't exist."""
         try:
@@ -371,6 +405,24 @@ def _reason(response: httpx.Response) -> str:
 
 
 INTENSITY_WORDS = {"slow": "Slow", "medium": "Medium", "fast": "Fast"}
+BODY_PARTS = ("arms", "legs", "head", "torso")
+
+
+def step_from_row(index: int, row: dict) -> dict:
+    """A saved steps row in the shape the app uses; pace and focus are read back from the
+    description _step_row wrote (e.g. "Fast · Arms + Legs")."""
+    description = row.get("description") or ""
+    pace, _, focus = description.partition(" · ")
+    intensity = next((k for k, word in INTENSITY_WORDS.items() if word == pace.strip()), "medium")
+    parts = [p.strip().lower() for p in focus.split("+")]
+    return {
+        "step_index": index,
+        "label": row.get("name") or f"Step {index + 1}",
+        "start_ms": row["start_ms"],
+        "end_ms": row["end_ms"],
+        "intensity": intensity,
+        "focus": [p for p in parts if p in BODY_PARTS],
+    }
 
 
 def _step_row(dance_id: str, step: dict) -> dict:
