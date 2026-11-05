@@ -34,6 +34,27 @@ export type DanceStep = {
   focus: ('arms' | 'legs' | 'head' | 'torso')[];
 };
 
+/** A dance saved in Supabase, as GET /dances lists it. */
+export type DanceSummary = {
+  id: string;
+  title: string;
+  source_url: string | null;
+  /** Filename on the backend that saved it (GET /videos/{video_path}). */
+  video_path: string | null;
+  /** False when another teammate's backend saved it, so this backend can't play it. */
+  video_available: boolean;
+  duration_ms: number | null;
+  status: 'processing' | 'ready' | 'failed';
+  is_public: boolean;
+  /** True for the signed-in user's own dances (only those can be edited). */
+  mine: boolean;
+  step_count: number;
+  created_at: string | null;
+};
+
+/** GET /dances/{id}: a dance with its steps. */
+export type DanceDetail = DanceSummary & { steps: DanceStep[] };
+
 /** Response of POST /reference-videos (Rodrigo's YouTube intake). */
 export type YouTubeImportResponse = {
   status: 'uploaded' | 'processing' | 'completed' | 'failed';
@@ -61,11 +82,20 @@ export type StepFeedback = {
   /** Similarity to the reference, 0 to 100. */
   score: number;
   feedback: string;
+  /** Seconds into the reference video this section covers. */
+  referenceStart?: number;
+  referenceEnd?: number;
 };
 
+/** POST /analyze, scored by Satwik's DTW comparison (backend/app/dtw_compare.py). */
 export type AnalysisResult = {
   /** Set by the backend so a result can be looked up later. */
   sessionId?: string;
+  /** 80% movement + 20% timing, 0 to 100. Over 80 passes a step. */
   overallScore: number;
+  movementScore?: number;
+  timingScore?: number;
+  /** Practice duration divided by the reference's: above 1 means slower than the tutorial. */
+  tempoRatio?: number;
   steps: StepFeedback[];
 };

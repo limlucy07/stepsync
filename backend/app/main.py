@@ -20,8 +20,9 @@ from .pose_processing import PoseArtifacts, run_pose_extraction
 from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
+from .dtw_compare import compare_csv
 from .segmentation import segment_steps, steps_from_ranges
-from .supabase_store import StepInUseError, StepsChangedError, SupabaseError, SupabaseStore, add_motion_features, load_pose_frames
+from .supabase_store import StepInUseError, StepsChangedError, SupabaseError, SupabaseStore, step_from_row, add_motion_features, load_pose_frames
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,62 @@ def create_app(
         path = find_saved_video(filename, settings.video_directory)
         return FileResponse(path, media_type="video/mp4")
 
+    def signed_in_user(authorization: str | None) -> str:
+        if store is None:
+            raise HTTPException(503, "The backend isn't connected to Supabase.")
+        owner_id = None
+        if authorization and authorization.lower().startswith("bearer "):
+            owner_id = store.user_id_for_token(authorization[7:].strip())
+        if owner_id is None:
+            raise HTTPException(401, "Log in to see your dances.")
+        return owner_id
+
+    def dance_summary(row: dict, user_id: str) -> dict:
+        video_path = row.get("video_path") or ""
+        try:
+            video_available = bool(video_path) and find_saved_video(video_path, settings.video_directory).is_file()
+        except HTTPException:
+            video_available = False  # saved by another teammate's backend, so the file isn't here
+        return {
+            "id": row["id"],
+            "title": row.get("title") or "Untitled dance",
+            "source_url": row.get("source_url"),
+            "video_path": video_path or None,
+            "video_available": video_available,
+            "duration_ms": row.get("duration_ms"),
+            "status": row.get("status") or "ready",
+            "is_public": bool(row.get("is_public")),
+            "mine": row.get("owner_id") == user_id,
+            "step_count": row.get("step_count", 0),
+            "created_at": row.get("created_at"),
+        }
+
+    @app.get("/dances")
+    def list_dances(authorization: str | None = Header(default=None)) -> dict:
+        """The signed-in user's dances and public ones, newest first, for the home screen."""
+        user_id = signed_in_user(authorization)
+        try:
+            rows = store.list_dances(user_id)
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        return {"dances": [dance_summary(row, user_id) for row in rows]}
+
+    @app.get("/dances/{dance_id}")
+    def get_dance(dance_id: str, authorization: str | None = Header(default=None)) -> dict:
+        """One dance with its steps, for the dance screen."""
+        user_id = signed_in_user(authorization)
+        try:
+            found = store.get_dance_with_steps(dance_id)
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        if found is None:
+            raise HTTPException(404, "That dance doesn't exist.")
+        row, steps = found
+        if row.get("owner_id") != user_id and not row.get("is_public"):
+            raise HTTPException(404, "That dance doesn't exist.")
+        return {**dance_summary({**row, "step_count": len(steps)}, user_id),
+                "steps": [step_from_row(i, step) for i, step in enumerate(steps)]}
+
     @app.put("/dances/{dance_id}/steps")
     def update_dance_steps(dance_id: str, body: StepsUpdate, authorization: str | None = Header(default=None)) -> dict:
         """Save steps edited in the app: cuts moved, steps split or merged. Steps that continue a saved
@@ -241,9 +298,15 @@ def create_app(
         practice: UploadFile = File(...),
         reference: UploadFile | None = File(None),
         reference_video: str | None = Form(None),
+        step_start_ms: int | None = Form(None),
+        step_end_ms: int | None = Form(None),
     ) -> dict:
-        """Receives the practice video from the phone app plus the reference, sent either
-        as a video file or as the `filename` POST /reference-videos returned for a YouTube link."""
+        """Scores the practice video against the reference with Satwik's DTW comparison (dtw_compare.py).
+
+        The reference is either an uploaded file or the `filename` POST /reference-videos returned for a
+        YouTube link (its saved pose data is reused). step_start_ms/step_end_ms limit the reference to one
+        tutorial step, so a recording of just that step gets a fair score."""
+        boundaries = step_boundaries(step_start_ms, step_end_ms)
         if (reference is None) == (reference_video is None):
             raise HTTPException(
                 422, "Send exactly one of 'reference' (a video file) or 'reference_video' "
@@ -262,9 +325,22 @@ def create_app(
         except HTTPException:
             shutil.rmtree(session_dir, ignore_errors=True)
             raise
-        # TODO: replace with the real pipeline (pose estimation, DTW, scoring).
+        model, timeout = settings.pose_model_path, settings.pose_processing_timeout_seconds
+        if saved_reference is not None:
+            # Pose data from the YouTube import; only extracted again if it's missing.
+            reference_dir = settings.pose_results_directory / saved_reference.stem
+            reference_csv = reference_dir / "pose_data.csv"
+            if not reference_csv.is_file():
+                reference_csv = pose_runner(saved_reference, reference_dir, model, timeout).data_path
+        else:
+            reference_csv = pose_runner(reference_path, session_dir / "reference_pose", model, timeout).data_path
+        practice_csv = pose_runner(practice_path, session_dir / "practice_pose", model, timeout).data_path
+        try:
+            result = compare_csv(reference_csv, practice_csv, **boundaries)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
         # The response shape must match AnalysisResult in frontend/src/api/types.ts.
-        return placeholder_result(session_id, reference_path, practice_path)
+        return {"sessionId": session_id, **result}
 
     return app
 
@@ -342,20 +418,18 @@ def save_upload(upload: UploadFile, folder: Path, stem: str) -> Path:
     return path
 
 
-def placeholder_result(session_id: str, reference: Path, practice: Path) -> dict:
-    ref_mb = reference.stat().st_size / 1_000_000
-    prac_mb = practice.stat().st_size / 1_000_000
-    note = (
-        f"Upload received: reference {ref_mb:.1f} MB, practice {prac_mb:.1f} MB "
-        f"(session {session_id[:8]}). Real analysis isn't wired up yet."
-    )
-    return {
-        "sessionId": session_id,
-        "overallScore": 0,
-        "steps": [
-            {"id": "1", "label": "Upload", "start": 0, "end": 0, "score": 0, "feedback": note},
-        ],
-    }
+MIN_SCORED_STEP_MS = 500
+
+
+def step_boundaries(start_ms: int | None, end_ms: int | None) -> dict:
+    """Reference time range (seconds) for compare_csv; empty when the whole dance is scored."""
+    if start_ms is None and end_ms is None:
+        return {}
+    if start_ms is None or end_ms is None or start_ms < 0 or end_ms <= start_ms:
+        raise HTTPException(422, "Send both step_start_ms and step_end_ms, with the end after the start.")
+    if end_ms - start_ms < MIN_SCORED_STEP_MS:
+        raise HTTPException(422, "This step is too short to score (under 0.5 s). Merge it with a neighbour in Edit.")
+    return {"reference_start": start_ms / 1000, "reference_end": end_ms / 1000}
 
 
 app = create_app()

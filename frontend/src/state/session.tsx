@@ -11,6 +11,12 @@ type Session = {
   setReference: (video: PickedVideo | null) => void;
   setPractice: (video: PickedVideo | null) => void;
   setResult: (result: AnalysisResult | null) => void;
+  /** Which tutorial step of the reference is being practiced; null scores the whole dance. */
+  currentStep: number | null;
+  setCurrentStep: (step: number | null) => void;
+  /** Steps passed (score over 80) for the current reference, this session only. */
+  completedSteps: number[];
+  markStepCompleted: (step: number) => void;
 };
 
 const SessionContext = createContext<Session | null>(null);
@@ -20,6 +26,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [practice, setPractice] = useState<PickedVideo | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [stepRecordings, setStepRecordings] = useState<Record<number, PickedVideo>>({});
+  const [currentStep, setCurrentStep] = useState<number | null>(null);
+  const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+
+  // A new reference starts its step practice from the first step.
+  const referenceKey = reference ? `${reference.fileName}:${reference.youtube?.steps?.length ?? 0}` : null;
+  useEffect(() => {
+    setCurrentStep(reference?.youtube?.steps?.length ? 0 : null);
+    setCompletedSteps([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [referenceKey]);
+
+  function markStepCompleted(step: number) {
+    setCompletedSteps((previous) => (previous.includes(step) ? previous : [...previous, step]));
+  }
   const ownedUrls = useRef(new Set<string>());
 
   useEffect(() => {
@@ -40,7 +60,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   return (
     <SessionContext.Provider
-      value={{ reference, practice, result, setReference, setPractice, setResult, stepRecordings, setStepRecording }}
+      value={{
+        reference,
+        practice,
+        result,
+        setReference,
+        setPractice,
+        setResult,
+        stepRecordings,
+        setStepRecording,
+        currentStep,
+        setCurrentStep,
+        completedSteps,
+        markStepCompleted,
+      }}
     >
       {children}
     </SessionContext.Provider>

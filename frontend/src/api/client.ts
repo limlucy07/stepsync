@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import { supabase, supabaseConfigured } from '@/lib/supabase';
 
 import { mockAnalyze } from './mock';
-import type { AnalysisResult, DanceStep, PickedVideo, YouTubeImportResponse } from './types';
+import type { AnalysisResult, DanceDetail, DanceStep, DanceSummary, PickedVideo, YouTubeImportResponse } from './types';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
@@ -19,6 +19,8 @@ export async function analyze(
   reference: PickedVideo,
   practice: PickedVideo,
   onProgress?: (fraction: number) => void,
+  /** Score against just this part of the reference (one tutorial step). */
+  step?: { start_ms: number; end_ms: number },
 ): Promise<AnalysisResult> {
   if (!API_URL) return mockAnalyze(practice);
 
@@ -27,6 +29,10 @@ export async function analyze(
   if (savedYouTube) body.append('reference_video', savedYouTube);
   else await appendVideo(body, 'reference', reference);
   await appendVideo(body, 'practice', practice);
+  if (step) {
+    body.append('step_start_ms', String(Math.round(step.start_ms)));
+    body.append('step_end_ms', String(Math.round(step.end_ms)));
+  }
 
   return postForm<AnalysisResult>(`${API_URL}/analyze`, body, onProgress);
 }
@@ -59,6 +65,29 @@ export async function importYouTube(url: string): Promise<YouTubeImportResponse>
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The signed-in user's dances and public ones, newest first (GET /dances). */
+export async function listDances(): Promise<DanceSummary[]> {
+  return (await getJson<{ dances: DanceSummary[] }>('/dances')).dances;
+}
+
+/** One saved dance with its steps (GET /dances/{id}). */
+export function getDance(danceId: string): Promise<DanceDetail> {
+  return getJson<DanceDetail>(`/dances/${encodeURIComponent(danceId)}`);
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  if (!API_URL) throw new Error('Connect the backend (EXPO_PUBLIC_API_URL) to see your dances.');
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { headers: await authHeader() });
+  } catch {
+    throw new Error(unreachable());
+  }
+  const text = await response.text();
+  if (!response.ok) throw new Error(errorMessage(text, response.status));
+  return JSON.parse(text) as T;
 }
 
 async function authHeader(): Promise<Record<string, string>> {
