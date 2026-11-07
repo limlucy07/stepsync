@@ -6,8 +6,9 @@ type Session = {
   reference: PickedVideo | null;
   practice: PickedVideo | null;
   result: AnalysisResult | null;
-  stepRecordings: Record<number, PickedVideo>;
-  setStepRecording: (step: number, video: PickedVideo) => void;
+  /** Recordings of single steps, keyed by recordingKey(danceId, stepIndex). */
+  stepRecordings: Record<string, PickedVideo>;
+  setStepRecording: (key: string, video: PickedVideo | null) => void;
   setReference: (video: PickedVideo | null) => void;
   setPractice: (video: PickedVideo | null) => void;
   setResult: (result: AnalysisResult | null) => void;
@@ -21,11 +22,16 @@ type Session = {
 
 const SessionContext = createContext<Session | null>(null);
 
+/** Key of a step recording: a saved dance's step, or a step of the sample lesson (danceId null). */
+export function recordingKey(danceId: string | null | undefined, stepIndex: number): string {
+  return `${danceId || 'sample'}:${stepIndex}`;
+}
+
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [reference, setReference] = useState<PickedVideo | null>(null);
   const [practice, setPractice] = useState<PickedVideo | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [stepRecordings, setStepRecordings] = useState<Record<number, PickedVideo>>({});
+  const [stepRecordings, setStepRecordings] = useState<Record<string, PickedVideo>>({});
   const [currentStep, setCurrentStep] = useState<number | null>(null);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
 
@@ -54,8 +60,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     for (const uri of ownedUrls.current) URL.revokeObjectURL(uri);
   }, []);
 
-  function setStepRecording(step: number, video: PickedVideo) {
-    setStepRecordings(previous => ({ ...previous, [step]: video }));
+  function setStepRecording(key: string, video: PickedVideo | null) {
+    setStepRecordings(previous => {
+      const next = { ...previous };
+      if (video) next[key] = video;
+      else delete next[key];
+      return next;
+    });
   }
 
   return (

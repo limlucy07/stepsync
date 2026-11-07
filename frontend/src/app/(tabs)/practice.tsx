@@ -126,8 +126,10 @@ function Chip({ label, selected, done, onPress }: { label: string; selected: boo
   );
 }
 
-// expo-camera can only record in the native app, not the browser.
-const canRecord = Platform.OS !== 'web';
+// The phone app records with expo-camera (record.tsx); the browser uses its webcam (record.web.tsx),
+// which needs camera support (localhost or HTTPS).
+const canRecord =
+  Platform.OS !== 'web' || (typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia));
 
 async function pickVideo(): Promise<PickedVideo | null> {
   const picked = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'] });

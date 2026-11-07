@@ -52,6 +52,12 @@ class FakeSupabase:
             return httpx.Response(200, json=[dict(d, steps=list(d["steps"])) for d in DANCES])
         if path == "/rest/v1/steps":
             return httpx.Response(200, json=STEPS if params["dance_id"] == "eq.d-new" else [])
+        if path == "/rest/v1/user_dance_progress":
+            return httpx.Response(200, json=[{"dance_id": "d-new", "steps_completed": 2}])
+        if path == "/rest/v1/practice_sessions":
+            return httpx.Response(200, json=[{"id": "ps-1"}] if params["dance_id"] == "eq.d-new" else [])
+        if path == "/rest/v1/step_attempts":
+            return httpx.Response(200, json=[{"step_id": "s1", "score": 95}, {"step_id": "s2", "score": 70}])
         return httpx.Response(404)
 
 
@@ -75,8 +81,9 @@ def test_lists_my_dances_and_public_ones_newest_first(tmp_path):
     assert new == {
         "id": "d-new", "title": "New one", "source_url": "https://youtu.be/b", "video_path": "here.mp4",
         "video_available": True, "duration_ms": 20500, "status": "ready", "is_public": False, "mine": True,
-        "step_count": 13, "created_at": "2026-11-01T00:00:00Z",
+        "step_count": 13, "created_at": "2026-11-01T00:00:00Z", "steps_completed": 2,
     }
+    assert old["steps_completed"] == 0
     assert old["video_available"] is False, "old.mp4 isn't on this backend"
     assert shared["mine"] is False and shared["video_available"] is False
     params = dict(next(r for r in fake.requests if r.url.path == "/rest/v1/dances").url.params)
@@ -91,10 +98,13 @@ def test_dance_with_steps(tmp_path):
     body = response.json()
     assert body["title"] == "New one" and body["mine"] and body["step_count"] == 3
     assert body["steps"] == [
-        {"step_index": 0, "label": "Step 1", "start_ms": 0, "end_ms": 800, "intensity": "fast", "focus": ["arms", "legs"]},
-        {"step_index": 1, "label": "Step 2", "start_ms": 800, "end_ms": 2000, "intensity": "slow", "focus": []},
-        {"step_index": 2, "label": "Step 3", "start_ms": 2000, "end_ms": 3000, "intensity": "medium", "focus": []},
+        {"id": "s1", "step_index": 0, "label": "Step 1", "start_ms": 0, "end_ms": 800, "intensity": "fast", "focus": ["arms", "legs"]},
+        {"id": "s2", "step_index": 1, "label": "Step 2", "start_ms": 800, "end_ms": 2000, "intensity": "slow", "focus": []},
+        {"id": "s3", "step_index": 2, "label": "Step 3", "start_ms": 2000, "end_ms": 3000, "intensity": "medium", "focus": []},
     ]
+    # Step 1 scored 95 (mastered); step 2 only 70, so it's the current step.
+    assert body["progress"] == {"mastered_step_ids": ["s1"], "best_scores": {"s1": 95, "s2": 70},
+                                "current_step": 1, "steps_completed": 1, "completed": False}
 
 
 def test_someone_elses_private_dance_is_hidden(tmp_path):
@@ -114,6 +124,19 @@ def test_needs_login(tmp_path, path):
 def test_without_supabase(tmp_path):
     with make_client(tmp_path, None) as client:
         assert client.get("/dances", headers=AUTH).status_code == 503
+
+
+def test_list_still_works_without_progress_table(tmp_path):
+    class NoProgress(FakeSupabase):
+        def __call__(self, request):
+            if request.url.path == "/rest/v1/user_dance_progress":
+                return httpx.Response(404, json={"code": "PGRST205", "message": "missing"})
+            return super().__call__(request)
+
+    with make_client(tmp_path, NoProgress()) as client:
+        response = client.get("/dances", headers=AUTH)
+    assert response.status_code == 200
+    assert all(d["steps_completed"] == 0 for d in response.json()["dances"])
 
 
 def test_supabase_errors_are_reported(tmp_path):

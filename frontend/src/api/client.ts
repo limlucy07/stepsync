@@ -3,7 +3,15 @@ import { Platform } from 'react-native';
 import { supabase, supabaseConfigured } from '@/lib/supabase';
 
 import { mockAnalyze } from './mock';
-import type { AnalysisResult, DanceDetail, DanceStep, DanceSummary, PickedVideo, YouTubeImportResponse } from './types';
+import type {
+  AnalysisResult,
+  DanceDetail,
+  DanceStep,
+  DanceSummary,
+  PickedVideo,
+  StepPracticeResult,
+  YouTubeImportResponse,
+} from './types';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
@@ -41,7 +49,8 @@ export async function analyze(
  * Asks the backend to download a YouTube video or Short (POST /reference-videos).
  * The backend also runs pose extraction before answering, so this can take minutes.
  */
-export async function importYouTube(url: string): Promise<YouTubeImportResponse> {
+/** Download a YouTube link and save it as a dance named `title` (unique among the user's dances). */
+export async function importYouTube(url: string, title?: string): Promise<YouTubeImportResponse> {
   if (!API_URL) throw new Error('Connect the backend (EXPO_PUBLIC_API_URL) to import YouTube links.');
 
   const controller = new AbortController();
@@ -52,7 +61,7 @@ export async function importYouTube(url: string): Promise<YouTubeImportResponse>
       method: 'POST',
       // The login token lets the backend save the dance under this user in Supabase.
       headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(title ? { url, title } : { url }),
       signal: controller.signal,
     });
     const text = await response.text();
@@ -65,6 +74,20 @@ export async function importYouTube(url: string): Promise<YouTubeImportResponse>
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Score a recording of one step of a saved dance and save the attempt; a score over 80 masters it. */
+export async function practiceStep(
+  danceId: string,
+  stepId: string,
+  practice: PickedVideo,
+  onProgress?: (fraction: number) => void,
+): Promise<StepPracticeResult> {
+  if (!API_URL) throw new Error('Connect the backend (EXPO_PUBLIC_API_URL) to score your step.');
+  const body = new FormData();
+  await appendVideo(body, 'practice', practice);
+  const path = `/dances/${encodeURIComponent(danceId)}/steps/${encodeURIComponent(stepId)}/practice`;
+  return postForm<StepPracticeResult>(`${API_URL}${path}`, body, onProgress, await authHeader());
 }
 
 /** The signed-in user's dances and public ones, newest first (GET /dances). */
@@ -103,10 +126,12 @@ function postForm<T>(
   url: string,
   body: FormData,
   onProgress?: (fraction: number) => void,
+  headers: Record<string, string> = {},
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
     xhr.timeout = 5 * 60 * 1000;
 
     xhr.upload.onprogress = (event) => {

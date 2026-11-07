@@ -1,51 +1,22 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { listDances, usingMockApi } from '@/api/client';
-import type { DanceSummary } from '@/api/types';
+import { DanceImage } from '@/components/dance-image';
 import { ProgressRing } from '@/components/progress-ring';
 import { continueWatching, progress, routines } from '@/data/home';
-import { danceThumbnail, formatClock } from '@/lib/dance';
+import { formatClock } from '@/lib/dance';
+import { useDances } from '@/lib/use-dances';
 import { colors, radius } from '@/theme';
 
 // Kaitlyn's step lesson, still on sample data; kept on the home screen so it stays reachable.
 const sampleLesson = routines.find((r) => r.id === 'perfect-night') ?? routines[0];
 
-/** Dances from Supabase (through the backend), reloaded whenever the home screen comes back into view. */
-function useDances() {
-  const [dances, setDances] = useState<DanceSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async () => {
-    if (usingMockApi) return;
-    setLoading(true);
-    try {
-      setDances(await listDances());
-      setError(null);
-    } catch (e) {
-      // Keep showing the last list if a refresh fails.
-      setError(e instanceof Error ? e.message : 'Could not load your dances.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      load();
-    }, [load]),
-  );
-  return { dances, error, loading, reload: load };
-}
-
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { dances, error, loading, reload } = useDances();
+  const { dances } = useDances();
   const latest = dances?.find((d) => d.mine) ?? dances?.[0] ?? null;
   const fraction = progress.movesCompleted / progress.movesTotal;
   const goPractice = () => router.push('/practice');
@@ -143,9 +114,17 @@ export default function HomeScreen() {
               {latest.title}
             </Text>
             <Text style={styles.caption}>
-              {latest.step_count} {latest.step_count === 1 ? 'step' : 'steps'}
+              {latest.steps_completed ?? 0} of {latest.step_count} {latest.step_count === 1 ? 'step' : 'steps'} mastered
               {latest.mine ? '' : ' · Shared'}
             </Text>
+            <View style={styles.track}>
+              <View
+                style={[
+                  styles.trackFill,
+                  { width: `${latest.step_count ? ((latest.steps_completed ?? 0) / latest.step_count) * 100 : 0}%` },
+                ]}
+              />
+            </View>
           </View>
           <Ionicons name="chevron-forward" size={18} color={colors.muted} />
         </Pressable>
@@ -172,72 +151,30 @@ export default function HomeScreen() {
         </Pressable>
       )}
 
-      {/* Dances from Supabase */}
-      {!usingMockApi && (
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Your dances</Text>
-          {loading && dances !== null && <ActivityIndicator size="small" color={colors.muted} />}
-        </View>
-      )}
+      {/* Lessons; every dance is listed in the Explore tab */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.routines}>
-        {dances === null && loading &&
-          [0, 1, 2].map((i) => (
-            <View key={i} style={styles.routine} accessibilityLabel="Loading dances">
-              <View style={[styles.routineImageWrap, styles.skeleton]} />
-              <View style={styles.skeletonLabel} />
-            </View>
-          ))}
-        {dances?.map((dance) => (
-          <Pressable
-            key={dance.id}
-            accessibilityRole="button"
-            accessibilityLabel={`Open ${dance.title}`}
-            onPress={() => openDance(dance.id)}
-            style={styles.routine}
-          >
-            <View style={[styles.routineImageWrap, styles.danceTile, dance.id === latest?.id && styles.routineSelected]}>
-              <DanceImage dance={dance} />
-              <Text style={styles.tileSteps}>{dance.step_count}</Text>
-            </View>
-            <Text style={styles.routineLabel} numberOfLines={1}>
-              {dance.title}
-            </Text>
-          </Pressable>
-        ))}
         <Pressable accessibilityRole="button" accessibilityLabel={`Learn ${sampleLesson.title}`} onPress={openLesson} style={styles.routine}>
-          <View style={styles.routineImageWrap}>
+          <View style={[styles.routineImageWrap, !latest && styles.routineSelected]}>
             <Image source={sampleLesson.image} style={styles.routineImage} resizeMode="cover" />
           </View>
           <Text style={styles.routineLabel} numberOfLines={1}>
             {sampleLesson.title}
           </Text>
         </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="All dances" onPress={() => router.navigate('/explore')} style={styles.routine}>
+          <View style={[styles.routineImageWrap, styles.addTile]}>
+            <Ionicons name="albums-outline" size={28} color={colors.text} />
+          </View>
+          <Text style={styles.routineLabel}>All dances</Text>
+        </Pressable>
         <Pressable onPress={goUpload} style={styles.routine}>
           <View style={[styles.routineImageWrap, styles.addTile]}>
             <Ionicons name="add" size={30} color={colors.text} />
           </View>
-          <Text style={styles.routineLabel}>{dances?.length === 0 ? 'Upload one' : 'Add More'}</Text>
+          <Text style={styles.routineLabel}>Add More</Text>
         </Pressable>
       </ScrollView>
-      {error && (
-        <Pressable onPress={reload} style={styles.errorRow} accessibilityLabel="Retry loading dances">
-          <Text style={styles.errorText}>{error}</Text>
-          <Text style={styles.retry}>Retry</Text>
-        </Pressable>
-      )}
     </ScrollView>
-  );
-}
-
-/** YouTube thumbnail of a dance, or a plain tile with an icon when it has none. */
-function DanceImage({ dance }: { dance: DanceSummary }) {
-  const uri = danceThumbnail(dance);
-  return uri ? (
-    <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-  ) : (
-    <View style={[StyleSheet.absoluteFill, styles.noThumb]}>
-      <Ionicons name="musical-notes" size={24} color={colors.accentSoft} />
-    </View>
   );
 }
 
@@ -353,28 +290,5 @@ const styles = StyleSheet.create({
   routineSelected: { borderColor: colors.accentSoft },
   routineImage: { width: '100%', height: '100%' },
   routineLabel: { color: colors.text, fontSize: 12, fontWeight: '500' },
-  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: -6 },
-  sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '600' },
-  skeleton: { backgroundColor: colors.hairline },
-  skeletonLabel: { width: 56, height: 10, borderRadius: 5, backgroundColor: colors.hairline },
-  danceTile: { backgroundColor: colors.surfaceAlt },
-  noThumb: { backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },
-  tileSteps: {
-    position: 'absolute',
-    right: 5,
-    bottom: 5,
-    minWidth: 20,
-    paddingHorizontal: 5,
-    borderRadius: radius.pill,
-    overflow: 'hidden',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    color: colors.onPrimary,
-    fontSize: 11,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  errorRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  errorText: { flex: 1, color: colors.bad, fontSize: 13, lineHeight: 18 },
-  retry: { color: colors.accent, fontSize: 14, fontWeight: '600' },
   addTile: { backgroundColor: colors.surface, alignItems: 'center', justifyContent: 'center' },
 });

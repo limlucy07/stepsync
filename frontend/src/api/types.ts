@@ -25,6 +25,8 @@ export type YouTubeSource = {
 
 /** One learnable step found by backend/app/segmentation.py. */
 export type DanceStep = {
+  /** Supabase steps.id; set on steps read from a saved dance. */
+  id?: string;
   step_index: number;
   label: string;
   start_ms: number;
@@ -36,6 +38,8 @@ export type DanceStep = {
 
 /** A dance saved in Supabase, as GET /dances lists it. */
 export type DanceSummary = {
+  /** Steps mastered in a row from the first one (user_dance_progress.steps_completed). */
+  steps_completed?: number;
   id: string;
   title: string;
   source_url: string | null;
@@ -53,7 +57,28 @@ export type DanceSummary = {
 };
 
 /** GET /dances/{id}: a dance with its steps. */
-export type DanceDetail = DanceSummary & { steps: DanceStep[] };
+export type DanceDetail = DanceSummary & { steps: DanceStep[]; progress: DanceProgress };
+
+/** The signed-in user's mastery of a dance. A step is mastered with a score over 80. */
+export type DanceProgress = {
+  mastered_step_ids: string[];
+  /** Best score per step id, for steps practiced at least once. */
+  best_scores: Record<string, number>;
+  /** Index of the step to practice next (first one not mastered); equals the step count when done. */
+  current_step: number;
+  steps_completed: number;
+  completed: boolean;
+};
+
+/** POST /dances/{id}/steps/{step_id}/practice: a scored attempt at one step. */
+export type StepPracticeResult = AnalysisResult & {
+  stepId: string;
+  stepIndex: number;
+  passed: boolean;
+  progress: DanceProgress;
+  /** Set when the score couldn't be saved (so it doesn't count yet). */
+  progress_error?: string;
+};
 
 /** Response of POST /reference-videos (Rodrigo's YouTube intake). */
 export type YouTubeImportResponse = {

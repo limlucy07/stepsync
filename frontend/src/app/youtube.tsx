@@ -13,7 +13,7 @@ import {
   View,
 } from 'react-native';
 
-import { importYouTube, savedVideoUrl, usingMockApi } from '@/api/client';
+import { importYouTube, listDances, savedVideoUrl, usingMockApi } from '@/api/client';
 import type { DanceStep, PickedVideo, YouTubeImportResponse, YouTubeSource } from '@/api/types';
 import { parseYouTubeUrl, youtubeThumbnail } from '@/api/youtube';
 import { PrimaryButton } from '@/components/primary-button';
@@ -24,9 +24,10 @@ import { colors, radius } from '@/theme';
 type Uploaded = { video: PickedVideo; result: YouTubeImportResponse };
 
 /**
- * Paste a YouTube Short (or video) link and upload it. The backend downloads it,
+ * Paste a YouTube Short (or video) link, name the dance and upload it. The backend downloads it,
  * extracts the dancer's keypoints and saves them with motion features to Supabase.
- *   ?from=home      shows what was saved, then offers to practice it
+ * Names are unique among the user's dances (ignoring capitals and extra spaces).
+ *   ?from=home      opens the dance's step scene once it's saved
  *   ?from=practice  sets it as the reference and returns to Practice
  */
 export default function UploadDanceScreen() {
@@ -36,6 +37,9 @@ export default function UploadDanceScreen() {
   const { setReference } = useSession();
 
   const [link, setLink] = useState('');
+  const [name, setName] = useState('');
+  // Names of the user's dances, to warn about a taken name before uploading (the backend checks too).
+  const [taken, setTaken] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +47,13 @@ export default function UploadDanceScreen() {
   const alive = useRef(true);
 
   useEffect(() => () => void (alive.current = false), []);
+
+  useEffect(() => {
+    if (usingMockApi) return;
+    listDances()
+      .then((dances) => alive.current && setTaken(new Set(dances.filter((d) => d.mine).map((d) => nameKey(d.title)))))
+      .catch(() => {}); // the backend still rejects a taken name
+  }, []);
 
   // The backend downloads and runs pose extraction before answering; show how long it's been.
   useEffect(() => {
@@ -53,6 +64,14 @@ export default function UploadDanceScreen() {
   }, [busy]);
 
   const parsed = parseYouTubeUrl(link);
+  const cleanName = name.replace(/\s+/g, ' ').trim();
+  const nameTaken = taken.has(nameKey(cleanName));
+  const nameError = nameTaken
+    ? `You already have a dance called "${cleanName}". Pick a different name.`
+    : cleanName.length > 80
+      ? 'Keep the name under 80 characters.'
+      : null;
+  const nameOk = usingMockApi || (cleanName.length > 0 && !nameError);
   const valid = 'videoId' in parsed;
   const kind = valid && parsed.isShort ? 'YouTube Short' : 'YouTube video';
 
@@ -63,7 +82,7 @@ export default function UploadDanceScreen() {
   }
 
   async function onUpload() {
-    if (!valid || busy) return;
+    if (!valid || !nameOk || busy) return;
     setError(null);
     const url = `https://www.youtube.com/watch?v=${parsed.videoId}`;
     const base = { url, videoId: parsed.videoId, isShort: parsed.isShort };
@@ -81,20 +100,25 @@ export default function UploadDanceScreen() {
     setBusy(true);
     setElapsed(0);
     try {
-      const result = await importYouTube(url);
+      const result = await importYouTube(url, cleanName);
       if (!alive.current) return;
       if (!result.persisted) throw new Error("The backend couldn't save that video.");
       const video = toVideo(
         {
           ...base,
-          title: result.filename.replace(/\.[^.]+$/, ''),
+          title: cleanName || result.filename.replace(/\.[^.]+$/, ''),
           serverFilename: result.filename,
           poseWarning: result.status === 'failed' ? (result.pose_error ?? 'Pose extraction failed.') : undefined,
           steps: result.steps ?? [],
         },
         result.metadata.duration_seconds * 1000,
       );
-      if (fromHome) setUploaded({ video, result });
+      if (fromHome && result.supabase_status === 'saved' && result.supabase_dance_id) {
+        // Straight to the dance's step scene, starting on step 1.
+        const id = result.supabase_dance_id;
+        router.back();
+        router.push({ pathname: '/dance/[id]', params: { id } });
+      } else if (fromHome) setUploaded({ video, result });
       else practice(video);
     } catch (e) {
       if (alive.current) setError(e instanceof Error ? e.message : 'Something went wrong.');
@@ -151,6 +175,32 @@ export default function UploadDanceScreen() {
           </View>
           {!valid && !!parsed.error && <Text style={styles.error}>{parsed.error}</Text>}
 
+          {!usingMockApi && (
+            <>
+              <Text style={styles.label}>Dance name</Text>
+              <View style={[styles.field, nameError ? styles.fieldError : null]}>
+                <Ionicons name="musical-notes-outline" size={20} color={colors.muted} />
+                <TextInput
+                  value={name}
+                  onChangeText={(text) => {
+                    setName(text);
+                    setError(null);
+                  }}
+                  placeholder="e.g. Perfect Night chorus"
+                  placeholderTextColor={colors.muted}
+                  autoCapitalize="words"
+                  maxLength={100}
+                  returnKeyType="go"
+                  onSubmitEditing={onUpload}
+                  editable={!busy}
+                  accessibilityLabel="Dance name"
+                  style={styles.input}
+                />
+              </View>
+              {nameError && <Text style={styles.error}>{nameError}</Text>}
+            </>
+          )}
+
           {valid && (
             <View style={styles.preview}>
               <Image source={{ uri: youtubeThumbnail(parsed.videoId) }} style={styles.thumbnail} resizeMode="cover" />
@@ -166,7 +216,8 @@ export default function UploadDanceScreen() {
           <View style={styles.uploadIcon}>
             <Ionicons name="cloud-upload-outline" size={36} color={valid ? colors.text : colors.border} />
           </View>
-          <PrimaryButton label={busy ? 'Uploading…' : 'Upload'} onPress={onUpload} disabled={!valid} loading={busy} arrow={false} />
+          <PrimaryButton label={busy ? 'Uploading…' : 'Upload'} onPress={onUpload} disabled={!valid || !nameOk} loading={busy} arrow={false} />
+          {valid && !cleanName && !usingMockApi && <Text style={styles.note}>Give the dance a name to upload it.</Text>}
 
           {busy && (
             <Text style={styles.note}>
@@ -284,6 +335,11 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Names match ignoring capitals and extra spaces (same rule as the backend). */
+function nameKey(title: string): string {
+  return title.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 function toVideo(youtube: YouTubeSource, durationMs: number | null): PickedVideo {
   return {
     uri: youtubeThumbnail(youtube.videoId),
@@ -327,6 +383,7 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.3 },
   uploadIcon: { alignItems: 'center', marginTop: 10 },
   lead: { color: colors.muted, fontSize: 15, lineHeight: 22 },
+  label: { color: colors.text, fontSize: 14, fontWeight: '600', marginBottom: -6 },
   field: {
     flexDirection: 'row',
     alignItems: 'center',

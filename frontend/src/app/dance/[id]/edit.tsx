@@ -12,8 +12,8 @@ import { danceThumbnail, danceToVideo, formatClock } from '@/lib/dance';
 import { useSession } from '@/state/session';
 import { colors, radius } from '@/theme';
 
-/** A dance saved in Supabase: its video, its steps, and (for your own dances) the step editor. */
-export default function DanceScreen() {
+/** A saved dance's video and steps, with the step editor for your own dances (from the step scene). */
+export default function EditDanceScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();

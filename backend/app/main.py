@@ -21,6 +21,7 @@ from .video import VideoError, validate_video
 from .youtube import download_video, validate_url
 from .storage import save_video
 from .dtw_compare import compare_csv
+from .progress import MAX_TITLE_LENGTH, can_practice, clean_title, dance_progress, passed, title_key
 from .segmentation import segment_steps, steps_from_ranges
 from .supabase_store import StepInUseError, StepsChangedError, SupabaseError, SupabaseStore, step_from_row, add_motion_features, load_pose_frames
 
@@ -44,6 +45,8 @@ class MetadataResponse(BaseModel):
 
 class YouTubeRequest(BaseModel):
     url: str
+    # The name the user gave the dance; must differ from the names of their other dances.
+    title: str | None = None
 
 
 class StepResponse(BaseModel):
@@ -132,6 +135,16 @@ def create_app(
 
     @app.post("/reference-videos", response_model=UploadResponse, status_code=200)
     def upload_video(request: YouTubeRequest, authorization: str | None = Header(default=None)):
+        title = clean_title(request.title or "")
+        if request.title is not None and not title:
+            raise HTTPException(422, "Give the dance a name.")
+        if len(title) > MAX_TITLE_LENGTH:
+            raise HTTPException(422, f"Keep the dance name under {MAX_TITLE_LENGTH} characters.")
+        if title:
+            # Checked before downloading anything, so a taken name fails fast.
+            owner_id = current_user(authorization)
+            if owner_id and name_taken(owner_id, title):
+                raise HTTPException(409, f'You already have a dance called "{title}". Pick a different name.')
         try:
             url = validate_url(request.url)
             with TemporaryDirectory(prefix="stepsync-youtube-") as directory:
@@ -145,7 +158,7 @@ def create_app(
                 if size == 0:
                     raise VideoError("empty_file", "The downloaded video is empty.")
                 metadata = validate_video(path, settings)
-                saved = save_video(path, downloaded.title, settings.video_directory)
+                saved = save_video(path, title or downloaded.title, settings.video_directory)
             try:
                 artifacts = pose_runner(
                     saved, settings.pose_results_directory / saved.stem,
@@ -163,7 +176,7 @@ def create_app(
                     supabase_error="Nothing was saved to Supabase because pose extraction failed.",
                 )
             supabase_result = save_to_supabase(
-                store, artifacts.data_path, url, downloaded.title, saved, metadata, authorization,
+                store, artifacts.data_path, url, title or clean_title(downloaded.title), saved, metadata, authorization,
             )
             return UploadResponse(
                 status=ProcessingState.completed, source_url=url, filename=saved.name,
@@ -187,6 +200,18 @@ def create_app(
         """
         path = find_saved_video(filename, settings.video_directory)
         return FileResponse(path, media_type="video/mp4")
+
+    def current_user(authorization: str | None) -> str | None:
+        """The signed-in user's id, or None without Supabase or a valid login."""
+        if store is None or not authorization or not authorization.lower().startswith("bearer "):
+            return None
+        return store.user_id_for_token(authorization[7:].strip())
+
+    def name_taken(owner_id: str, title: str) -> bool:
+        try:
+            return title_key(title) in {title_key(t) for t in store.dance_titles(owner_id)}
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
 
     def signed_in_user(authorization: str | None) -> str:
         if store is None:
@@ -226,7 +251,13 @@ def create_app(
             rows = store.list_dances(user_id)
         except SupabaseError as error:
             raise HTTPException(502, str(error))
-        return {"dances": [dance_summary(row, user_id) for row in rows]}
+        try:
+            completed = store.progress_by_dance(user_id)
+        except SupabaseError:
+            logger.exception("Could not read user_dance_progress")
+            completed = {}  # the list still works without progress
+        return {"dances": [{**dance_summary(row, user_id), "steps_completed": completed.get(row["id"], 0)}
+                           for row in rows]}
 
     @app.get("/dances/{dance_id}")
     def get_dance(dance_id: str, authorization: str | None = Header(default=None)) -> dict:
@@ -241,8 +272,79 @@ def create_app(
         row, steps = found
         if row.get("owner_id") != user_id and not row.get("is_public"):
             raise HTTPException(404, "That dance doesn't exist.")
+        progress = progress_for(user_id, dance_id, steps)
         return {**dance_summary({**row, "step_count": len(steps)}, user_id),
-                "steps": [step_from_row(i, step) for i, step in enumerate(steps)]}
+                "steps": [step_from_row(i, step) for i, step in enumerate(steps)],
+                "progress": progress}
+
+    def progress_for(user_id: str, dance_id: str, steps: list[dict]) -> dict:
+        try:
+            return dance_progress(steps, store.step_attempts(user_id, dance_id))
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+
+    @app.post("/dances/{dance_id}/steps/{step_id}/practice")
+    def practice_step(
+        dance_id: str,
+        step_id: str,
+        practice: UploadFile = File(...),
+        authorization: str | None = Header(default=None),
+    ) -> dict:
+        """Score a recording of one step against that step of the tutorial and save the attempt.
+
+        A step is mastered with a score over 80. Only the current step (the first one not mastered)
+        and steps already mastered can be practiced; later ones stay locked.
+        """
+        user_id = signed_in_user(authorization)
+        try:
+            found = store.get_dance_with_steps(dance_id)
+        except SupabaseError as error:
+            raise HTTPException(502, str(error))
+        if found is None or (found[0].get("owner_id") != user_id and not found[0].get("is_public")):
+            raise HTTPException(404, "That dance doesn't exist.")
+        row, steps = found
+        index = next((i for i, step in enumerate(steps) if step["id"] == step_id), None)
+        if index is None:
+            raise HTTPException(404, "That step isn't part of this dance.")
+        progress = progress_for(user_id, dance_id, steps)
+        if not can_practice(progress, index):
+            raise HTTPException(403, f"Master step {progress['current_step'] + 1} first to unlock step {index + 1}.")
+        boundaries = step_boundaries(steps[index]["start_ms"], steps[index]["end_ms"])
+
+        try:
+            video = find_saved_video(row.get("video_path") or "", settings.video_directory)
+        except HTTPException:
+            raise HTTPException(409, "This dance's video isn't on this backend (it was uploaded through another "
+                                     "teammate's backend), so it can't be scored here.")
+        session_id = uuid.uuid4().hex
+        session_dir = UPLOAD_DIR / session_id
+        session_dir.mkdir(parents=True)
+        practice_path = save_upload(practice, session_dir, "practice")
+        model, timeout = settings.pose_model_path, settings.pose_processing_timeout_seconds
+        reference_dir = settings.pose_results_directory / video.stem
+        reference_csv = reference_dir / "pose_data.csv"
+        if not reference_csv.is_file():
+            reference_csv = pose_runner(video, reference_dir, model, timeout).data_path
+        practice_csv = pose_runner(practice_path, session_dir / "practice_pose", model, timeout).data_path
+        try:
+            result = compare_csv(reference_csv, practice_csv, **boundaries)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+        score = int(result["overallScore"])
+        response = {"sessionId": session_id, **result, "stepId": step_id, "stepIndex": index, "passed": passed(score)}
+        try:
+            store.record_attempt(user_id, dance_id, step_id, score)
+            progress = dance_progress(steps, store.step_attempts(user_id, dance_id))
+            current = progress["current_step"]
+            store.save_progress(user_id, dance_id, progress["steps_completed"],
+                                steps[current]["id"] if current < len(steps) else None)
+        except SupabaseError as error:
+            # The score is still shown; only saving it failed.
+            logger.error("Could not save the attempt: %s", error)
+            response["progress_error"] = f"Your score couldn't be saved, so it won't count yet. {error}"
+        response["progress"] = progress
+        return response
 
     @app.put("/dances/{dance_id}/steps")
     def update_dance_steps(dance_id: str, body: StepsUpdate, authorization: str | None = Header(default=None)) -> dict:
@@ -372,7 +474,7 @@ def save_to_supabase(store, data_path: Path, url: str, title: str, saved: Path, 
             return {"steps": step_info, "supabase_status": "failed",
                     "supabase_error": "Log in to save dances to Supabase; every dance needs an owner."}
         dance = {
-            "owner_id": owner_id, "title": title or saved.stem, "source_url": url,
+            "owner_id": owner_id, "title": unique_title(store, owner_id, title or saved.stem), "source_url": url,
             "video_path": saved.name,  # the name /analyze accepts as reference_video
             "duration_ms": round(metadata.duration_seconds * 1000), "status": "ready",
         }
@@ -385,6 +487,18 @@ def save_to_supabase(store, data_path: Path, url: str, title: str, saved: Path, 
         logger.exception("Saving to Supabase failed")
         return {"steps": step_info, "supabase_status": "failed",
                 "supabase_error": "Saving to Supabase failed unexpectedly. Check the backend logs."}
+
+
+def unique_title(store, owner_id: str, title: str) -> str:
+    """The title, or "title (2)", "(3)"... if the user already has a dance with that name.
+
+    Names the user typed are checked (and rejected) before the download; this catches the rest,
+    like a YouTube title used when no name was given."""
+    taken = {title_key(t) for t in store.dance_titles(owner_id)}
+    candidate, number = title, 2
+    while title_key(candidate) in taken:
+        candidate, number = f"{title} ({number})", number + 1
+    return candidate
 
 
 def find_saved_video(name: str, directory: Path) -> Path:

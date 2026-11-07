@@ -59,8 +59,9 @@ def test_csv_without_landmark_columns(tmp_path):
 class FakeSupabase:
     """Records requests and answers like Supabase's REST API."""
 
-    def __init__(self, fail_table=None, fail_status=500, fail_body=None):
+    def __init__(self, fail_table=None, fail_status=500, fail_body=None, titles=()):
         self.requests = []
+        self.titles = list(titles)  # names of the user's existing dances
         self.fail_table, self.fail_status, self.fail_body = fail_table, fail_status, fail_body or {"message": "boom"}
 
     def posted(self, table):
@@ -75,6 +76,8 @@ class FakeSupabase:
         table = path.removeprefix("/rest/v1/")
         if request.method == "DELETE":
             return httpx.Response(204)
+        if request.method == "GET" and table == "dances":
+            return httpx.Response(200, json=[{"title": t} for t in self.titles])
         if request.method == "POST":
             if table == self.fail_table:
                 return httpx.Response(self.fail_status, json=self.fail_body)
@@ -166,7 +169,7 @@ def test_config_from_env(monkeypatch):
 
 # --- through the endpoint ---------------------------------------------------
 
-def import_short(tmp_path, store, video, headers=None, pose_csv=SAMPLE_CSV):
+def import_short(tmp_path, store, video, headers=None, pose_csv=SAMPLE_CSV, title=None):
     def download(url, directory, settings):
         from app.youtube import DownloadedVideo
         path = directory / "input.mp4"
@@ -182,8 +185,9 @@ def import_short(tmp_path, store, video, headers=None, pose_csv=SAMPLE_CSV):
         return PoseArtifacts(preview, data)
 
     app = create_app(Settings(data_directory=tmp_path / "data"), pose_runner=pose_runner, supabase_store=store)
+    body = {"url": "https://youtube.com/shorts/jNQXAC9IVRw", **({"title": title} if title is not None else {})}
     with patch("app.main.download_video", download), TestClient(app) as client:
-        return client.post("/reference-videos", json={"url": "https://youtube.com/shorts/jNQXAC9IVRw"}, headers=headers or {})
+        return client.post("/reference-videos", json=body, headers=headers or {})
 
 
 @needs_sample
@@ -246,3 +250,44 @@ def test_error_includes_supabase_reason():
     with pytest.raises(SupabaseError, match="keyframes_frame_order_check"):
         make_store(FakeSupabase(fail_table="keyframes", fail_status=400, fail_body=body)).save_dance(
             {"owner_id": "u", "title": "x"}, frames_fixture(90), STEPS)
+
+
+# --- dance names --------------------------------------------------------------
+
+LOGIN = {"Authorization": "Bearer good-token"}
+
+
+@needs_sample
+def test_endpoint_saves_the_name_the_user_gave(tmp_path, video):
+    fake = FakeSupabase(titles=["Perfect Night"])
+    response = import_short(tmp_path, make_store(fake), video, headers=LOGIN, title="  My   Routine ")
+    assert response.status_code == 200, response.json()
+    assert fake.posted("dances")[0]["title"] == "My Routine"  # trimmed, spaces collapsed
+    assert response.json()["filename"] == "My Routine.mp4"
+
+
+@needs_sample
+@pytest.mark.parametrize("name", ["Perfect Night", "perfect night", "  PERFECT   night "])
+def test_endpoint_rejects_a_name_already_used(tmp_path, video, name):
+    fake = FakeSupabase(titles=["Perfect Night"])
+    response = import_short(tmp_path, make_store(fake), video, headers=LOGIN, title=name)
+    assert response.status_code == 409
+    assert "already have a dance called" in response.json()["detail"]
+    assert not fake.posted("dances")
+    assert not list((tmp_path / "data").rglob("*.mp4")), "rejected before downloading anything"
+
+
+@needs_sample
+@pytest.mark.parametrize("name, message", [("   ", "Give the dance a name"), ("x" * 81, "under 80")])
+def test_endpoint_rejects_bad_names(tmp_path, video, name, message):
+    response = import_short(tmp_path, make_store(FakeSupabase()), video, headers=LOGIN, title=name)
+    assert response.status_code == 422
+    assert message in response.json()["detail"]
+
+
+@needs_sample
+def test_youtube_title_gets_a_number_when_taken(tmp_path, video):
+    # No name sent (older app): the YouTube title is used, numbered so it stays unique.
+    fake = FakeSupabase(titles=["Dance Short", "dance short (2)"])
+    import_short(tmp_path, make_store(fake), video, headers=LOGIN)
+    assert fake.posted("dances")[0]["title"] == "Dance Short (3)"

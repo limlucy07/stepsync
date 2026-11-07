@@ -4,17 +4,19 @@ import {
   useMicrophonePermissions,
   type CameraType,
 } from 'expo-camera';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { PickedVideo } from '@/api/types';
-import { lessonStepIndex } from '@/data/lesson';
-import { useSession } from '@/state/session';
+import { StepClip } from '@/components/step-clip';
+import { recordingKey, useSession } from '@/state/session';
 import { colors } from '@/theme';
 
 const COUNTDOWN_SECONDS = 3;
+// If the preview hasn't started by then, say so and offer to restart the camera.
+const CAMERA_START_TIMEOUT_MS = 4000;
 const MAX_SECONDS = 180;
 
 type Phase = 'idle' | 'countdown' | 'recording';
@@ -22,7 +24,16 @@ type Phase = 'idle' | 'countdown' | 'recording';
 export default function RecordScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { slot, step } = useLocalSearchParams<{ slot?: string; step?: string }>();
+  const { slot, step, key, clip, clipStart, clipEnd } = useLocalSearchParams<{
+    slot?: string;
+    step?: string;
+    /** Session key for a step recording (see recordingKey). */
+    key?: string;
+    /** The step's part of the tutorial video, shown above the camera. */
+    clip?: string;
+    clipStart?: string;
+    clipEnd?: string;
+  }>();
   const target = slot === 'reference' ? 'reference' : 'practice';
   const { setReference, setPractice, setStepRecording } = useSession();
 
@@ -40,6 +51,44 @@ export default function RecordScreen() {
   const [count, setCount] = useState(COUNTDOWN_SECONDS);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // The camera is mounted once the screen has finished sliding in (on iOS a camera started mid-animation
+  // can stay black), runs only while this screen is showing, and is remounted by "Try again".
+  const [mounted, setMounted] = useState(false);
+  const [focused, setFocused] = useState(true);
+  const [attempt, setAttempt] = useState(0);
+  const [stuck, setStuck] = useState(false);
+
+  const navigation = useNavigation();
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('transitionEnd' as never, () => setMounted(true));
+    const fallback = setTimeout(() => setMounted(true), 600);
+    return () => {
+      unsubscribe();
+      clearTimeout(fallback);
+    };
+  }, [navigation]);
+
+  useFocusEffect(
+    useCallback(() => {
+      setFocused(true);
+      return () => setFocused(false);
+    }, []),
+  );
+
+  const cameraAllowed = Boolean(cameraPermission?.granted);
+  useEffect(() => {
+    if (!mounted || !cameraAllowed || cameraReady || Platform.OS === 'web') return;
+    setStuck(false);
+    const timer = setTimeout(() => setStuck(true), CAMERA_START_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [mounted, cameraAllowed, cameraReady, attempt]);
+
+  function restartCamera() {
+    setStuck(false);
+    setError(null);
+    setCameraReady(false);
+    setAttempt((n) => n + 1);
+  }
 
   useEffect(() => () => {
     discardRecording.current = true;
@@ -54,16 +103,7 @@ export default function RecordScreen() {
     return () => clearInterval(id);
   }, [phase]);
 
-  if (Platform.OS === 'web') {
-    return (
-      <Message
-        title="Recording needs the phone app"
-        body="The browser can't record here yet. Open StepSync in Expo Go to film, or go back and choose an existing video."
-        action="Go back"
-        onAction={() => router.back()}
-      />
-    );
-  }
+  // (The browser uses record.web.tsx instead of this screen.)
 
   // Permission hooks are still loading.
   if (!cameraPermission || !micPermission) return <View style={styles.fill} />;
@@ -114,7 +154,7 @@ export default function RecordScreen() {
       if (!video?.uri) return setPhase('idle');
 
       const picked = toPickedVideo(video.uri, target, durationMs);
-      if (step && target === 'practice') setStepRecording(lessonStepIndex(step), picked);
+      if (step && target === 'practice') setStepRecording(key || recordingKey(null, Math.max(0, Number(step) - 1)), picked);
       else if (target === 'reference') setReference(picked);
       else setPractice(picked);
       router.back();
@@ -132,18 +172,48 @@ export default function RecordScreen() {
 
   return (
     <View style={styles.fill}>
-      <CameraView
-        ref={camera}
-        style={step ? styles.stepCamera : StyleSheet.absoluteFill}
-        mode="video"
-        facing={facing}
-        videoQuality="720p"
-        mute={!micPermission.granted}
-        onCameraReady={() => setCameraReady(true)}
-        onMountError={(e) => setError(e.message)}
-      />
+      {mounted && (
+        <CameraView
+          key={attempt}
+          ref={camera}
+          style={step ? styles.stepCamera : StyleSheet.absoluteFill}
+          mode="video"
+          facing={facing}
+          videoQuality="720p"
+          active={focused}
+          mute={!micPermission.granted}
+          onCameraReady={() => {
+            setCameraReady(true);
+            setStuck(false);
+          }}
+          onMountError={(e) => setError(`The camera couldn't start: ${e.message}`)}
+        />
+      )}
 
-      {step && <View testID="step-clip-placeholder" style={styles.stepReference}><Text style={styles.hint}>Step clip coming soon</Text></View>}
+      {(stuck || !cameraReady) && phase === 'idle' && (
+        <View style={[styles.center, step ? { top: '45%' } : undefined]} pointerEvents="box-none">
+          {stuck || error ? (
+            <View style={styles.stuck}>
+              <Text style={styles.stuckTitle}>The camera isn't showing</Text>
+              <Text style={styles.stuckBody}>
+                Close other apps that use the camera (FaceTime, Camera, video calls), and check Settings › Expo Go ›
+                Camera is on. Then try again.
+              </Text>
+              <Pressable onPress={restartCamera} style={styles.primary} accessibilityLabel="Restart the camera">
+                <Text style={styles.primaryText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Text style={styles.hint}>Starting camera…</Text>
+          )}
+        </View>
+      )}
+
+      {step && (clip ? (
+        <StepClip testID="step-clip" source={clip} startMs={Number(clipStart) || 0} endMs={Number(clipEnd) || 0} muted style={styles.stepReference} />
+      ) : (
+        <View testID="step-clip-placeholder" style={styles.stepReference}><Text style={styles.hint}>Step clip coming soon</Text></View>
+      ))}
 
       <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
         <RoundButton
@@ -301,6 +371,9 @@ const styles = StyleSheet.create({
   bottom: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 24, gap: 18 },
   hint: { color: '#fff', textAlign: 'center', fontSize: 14, opacity: 0.9 },
   error: { color: colors.bad, textAlign: 'center', fontSize: 14 },
+  stuck: { marginHorizontal: 28, padding: 20, gap: 12, borderRadius: 18, backgroundColor: 'rgba(20,18,15,0.92)', alignItems: 'center' },
+  stuckTitle: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  stuckBody: { color: '#fff', opacity: 0.85, fontSize: 14, lineHeight: 20, textAlign: 'center' },
   controls: { flexDirection: 'row', alignItems: 'center' },
   shutter: {
     width: 78,

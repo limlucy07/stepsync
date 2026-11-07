@@ -39,7 +39,8 @@ function RootStack() {
         <Stack.Protected guard={signedIn}>
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="steps" options={{ headerShown: false }} />
-          <Stack.Screen name="dance/[id]" options={{ headerShown: false }} />
+          <Stack.Screen name="dance/[id]/index" options={{ headerShown: false }} />
+          <Stack.Screen name="dance/[id]/edit" options={{ headerShown: false }} />
           <Stack.Screen name="step-recording" options={{ headerShown: false }} />
           <Stack.Screen name="results" options={{ title: 'Feedback' }} />
           <Stack.Screen

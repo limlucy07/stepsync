@@ -245,6 +245,64 @@ class SupabaseStore:
         }).json()
         return rows[0], steps
 
+    def dance_titles(self, owner_id: str) -> list[str]:
+        """Titles of every dance this user owns (to keep names unique per user)."""
+        rows = self._get("dances", {"owner_id": f"eq.{owner_id}", "select": "title"}).json()
+        return [row["title"] for row in rows if row.get("title")]
+
+    def step_attempts(self, user_id: str, dance_id: str) -> list[dict]:
+        """Every scored attempt (step_id, score) this user made on this dance."""
+        sessions = self._get("practice_sessions", {
+            "user_id": f"eq.{user_id}", "dance_id": f"eq.{dance_id}", "select": "id",
+        }).json()
+        if not sessions:
+            return []
+        ids = ",".join(row["id"] for row in sessions)
+        return self._get("step_attempts", {"session_id": f"in.({ids})", "select": "step_id,score"}).json()
+
+    def record_attempt(self, user_id: str, dance_id: str, step_id: str, score: int) -> None:
+        """Log a scored attempt in the user's practice session for this dance (created on first use)."""
+        sessions = self._get("practice_sessions", {
+            "user_id": f"eq.{user_id}", "dance_id": f"eq.{dance_id}", "select": "id", "limit": "1",
+        }).json()
+        if sessions:
+            session_id = sessions[0]["id"]
+        else:
+            created = self._send("post", "practice_sessions", json={"user_id": user_id, "dance_id": dance_id},
+                                 prefer="return=representation")
+            session_id = created.json()[0]["id"]
+        previous = self._get("step_attempts", {
+            "session_id": f"eq.{session_id}", "step_id": f"eq.{step_id}", "select": "attempt_number",
+        }).json()
+        number = max((row.get("attempt_number") or 0 for row in previous), default=0) + 1
+        self._send("post", "step_attempts", json={
+            "session_id": session_id, "step_id": step_id, "attempt_number": number, "score": score,
+        })
+
+    def save_progress(self, user_id: str, dance_id: str, steps_completed: int, current_step_id: str | None) -> None:
+        """Update (or start) the user's user_dance_progress row for this dance."""
+        values = {"steps_completed": steps_completed, "current_step_id": current_step_id}
+        updated = self._send("patch", "user_dance_progress", json=values, prefer="return=representation",
+                             params={"user_id": f"eq.{user_id}", "dance_id": f"eq.{dance_id}"})
+        if not updated.json():
+            self._send("post", "user_dance_progress", json={"user_id": user_id, "dance_id": dance_id, **values})
+
+    def progress_by_dance(self, user_id: str) -> dict[str, int]:
+        """steps_completed per dance for this user, for the home screen."""
+        rows = self._get("user_dance_progress", {"user_id": f"eq.{user_id}", "select": "dance_id,steps_completed"})
+        return {row["dance_id"]: row.get("steps_completed") or 0 for row in rows.json()}
+
+    def _send(self, method: str, table: str, json, prefer: str | None = None, params: dict | None = None) -> httpx.Response:
+        headers = {**self._headers(), **({"Prefer": prefer} if prefer else {})}
+        try:
+            response = self.client.request(method.upper(), f"{self.config.url}/rest/v1/{table}",
+                                           json=json, params=params, headers=headers)
+        except httpx.HTTPError as error:
+            logger.exception("Supabase request failed")
+            raise SupabaseError("Couldn't reach Supabase. Check STEPSYNC_SUPABASE_URL and the network.") from error
+        self._check(response, table)
+        return response
+
     def _get(self, table: str, params: dict) -> httpx.Response:
         try:
             response = self.client.get(f"{self.config.url}/rest/v1/{table}", params=params, headers=self._headers())
@@ -416,6 +474,7 @@ def step_from_row(index: int, row: dict) -> dict:
     intensity = next((k for k, word in INTENSITY_WORDS.items() if word == pace.strip()), "medium")
     parts = [p.strip().lower() for p in focus.split("+")]
     return {
+        **({"id": row["id"]} if row.get("id") else {}),
         "step_index": index,
         "label": row.get("name") or f"Step {index + 1}",
         "start_ms": row["start_ms"],
