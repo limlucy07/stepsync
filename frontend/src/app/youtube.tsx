@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   Image,
@@ -18,7 +18,6 @@ import type { DanceStep, PickedVideo, YouTubeImportResponse, YouTubeSource } fro
 import { parseYouTubeUrl, youtubeThumbnail } from '@/api/youtube';
 import { PrimaryButton } from '@/components/primary-button';
 import { StepPlayer } from '@/components/step-player';
-import { useSession } from '@/state/session';
 import { colors, radius } from '@/theme';
 
 type Uploaded = { video: PickedVideo; result: YouTubeImportResponse };
@@ -27,14 +26,10 @@ type Uploaded = { video: PickedVideo; result: YouTubeImportResponse };
  * Paste a YouTube Short (or video) link, name the dance and upload it. The backend downloads it,
  * extracts the dancer's keypoints and saves them with motion features to Supabase.
  * Names are unique among the user's dances (ignoring capitals and extra spaces).
- *   ?from=home      opens the dance's step scene once it's saved
- *   ?from=practice  sets it as the reference and returns to Practice
+ * Once it's saved, the dance's step scene opens; it is also listed in the Explore tab.
  */
 export default function UploadDanceScreen() {
   const router = useRouter();
-  const { from } = useLocalSearchParams<{ from?: string }>();
-  const fromHome = from === 'home';
-  const { setReference } = useSession();
 
   const [link, setLink] = useState('');
   const [name, setName] = useState('');
@@ -75,12 +70,6 @@ export default function UploadDanceScreen() {
   const valid = 'videoId' in parsed;
   const kind = valid && parsed.isShort ? 'YouTube Short' : 'YouTube video';
 
-  function practice(video: PickedVideo) {
-    setReference(video);
-    router.back();
-    router.navigate('/practice');
-  }
-
   async function onUpload() {
     if (!valid || !nameOk || busy) return;
     setError(null);
@@ -88,12 +77,7 @@ export default function UploadDanceScreen() {
     const base = { url, videoId: parsed.videoId, isShort: parsed.isShort };
 
     if (usingMockApi) {
-      if (fromHome) {
-        setError('Uploading needs the backend. Set EXPO_PUBLIC_API_URL in frontend/.env and restart Expo.');
-        return;
-      }
-      // Practice can still be clicked through without a backend; nothing is downloaded.
-      practice(toVideo({ ...base, title: kind, serverFilename: null }, null));
+      setError('Uploading needs the backend. Set EXPO_PUBLIC_API_URL in frontend/.env and restart Expo.');
       return;
     }
 
@@ -113,13 +97,12 @@ export default function UploadDanceScreen() {
         },
         result.metadata.duration_seconds * 1000,
       );
-      if (fromHome && result.supabase_status === 'saved' && result.supabase_dance_id) {
+      if (result.supabase_status === 'saved' && result.supabase_dance_id) {
         // Straight to the dance's step scene, starting on step 1.
         const id = result.supabase_dance_id;
         router.back();
         router.push({ pathname: '/dance/[id]', params: { id } });
-      } else if (fromHome) setUploaded({ video, result });
-      else practice(video);
+      } else setUploaded({ video, result });
     } catch (e) {
       if (alive.current) setError(e instanceof Error ? e.message : 'Something went wrong.');
     } finally {
@@ -134,14 +117,13 @@ export default function UploadDanceScreen() {
       {uploaded ? (
         <UploadedView
           uploaded={uploaded}
-          onPractice={() => practice(uploaded.video)}
           onAnother={() => {
             setUploaded(null);
             setLink('');
           }}
           onDone={() => router.back()}
           onStepsSaved={(steps) =>
-            // Keep "Practice this dance" in sync with edited steps.
+            // Keep the step list in sync with edited steps.
             setUploaded((current) =>
               current && current.video.youtube
                 ? { ...current, video: { ...current.video, youtube: { ...current.video.youtube, steps } } }
@@ -225,9 +207,6 @@ export default function UploadDanceScreen() {
               minute ({formatClock(elapsed)} so far).
             </Text>
           )}
-          {usingMockApi && !fromHome && (
-            <Text style={styles.note}>Mock mode: the link is kept but not downloaded.</Text>
-          )}
         </>
       )}
     </Overlay>
@@ -262,13 +241,11 @@ function Overlay({ title, onClose, children }: { title?: string; onClose?: () =>
 
 function UploadedView({
   uploaded: { video, result },
-  onPractice,
   onAnother,
   onDone,
   onStepsSaved,
 }: {
   uploaded: Uploaded;
-  onPractice: () => void;
   onAnother: () => void;
   onDone: () => void;
   onStepsSaved: (steps: DanceStep[]) => void;
@@ -313,13 +290,10 @@ function UploadedView({
         onStepsSaved={onStepsSaved}
       />
 
-      <PrimaryButton label="Practice this dance" onPress={onPractice} />
+      <PrimaryButton label="Done" onPress={onDone} arrow={false} />
       <View style={styles.secondaryRow}>
         <Pressable onPress={onAnother} hitSlop={8}>
           <Text style={styles.link}>Upload another</Text>
-        </Pressable>
-        <Pressable onPress={onDone} hitSlop={8}>
-          <Text style={styles.link}>Done</Text>
         </Pressable>
       </View>
     </>

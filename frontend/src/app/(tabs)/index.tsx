@@ -3,11 +3,8 @@ import { useRouter } from 'expo-router';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { DanceImage } from '@/components/dance-image';
 import { ProgressRing } from '@/components/progress-ring';
 import { continueWatching, progress, routines } from '@/data/home';
-import { formatClock } from '@/lib/dance';
-import { useDances } from '@/lib/use-dances';
 import { colors, radius } from '@/theme';
 
 // Kaitlyn's step lesson, still on sample data; kept on the home screen so it stays reachable.
@@ -16,12 +13,10 @@ const sampleLesson = routines.find((r) => r.id === 'perfect-night') ?? routines[
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { dances } = useDances();
-  const latest = dances?.find((d) => d.mine) ?? dances?.[0] ?? null;
   const fraction = progress.movesCompleted / progress.movesTotal;
-  const goPractice = () => router.push('/practice');
-  const goUpload = () => router.push('/youtube?from=home');
-  const openDance = (id: string) => router.push({ pathname: '/dance/[id]', params: { id } });
+  // Saved dances live in the Explore tab; pick one there to learn it step by step.
+  const goExplore = () => router.navigate('/explore');
+  const goUpload = () => router.push('/youtube');
   const openLesson = () => router.push('/steps');
 
   return (
@@ -59,7 +54,7 @@ export default function HomeScreen() {
       </View>
 
       <View style={styles.ctaRow}>
-        <Pressable onPress={goPractice} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
+        <Pressable onPress={goExplore} style={({ pressed }) => [styles.cta, pressed && styles.pressed]}>
           <Ionicons name="play" size={16} color={colors.onPrimary} />
           <Text style={styles.ctaText}>Start Learning</Text>
           <Ionicons name="arrow-forward" size={18} color={colors.onPrimary} />
@@ -75,7 +70,7 @@ export default function HomeScreen() {
       </View>
 
       {/* Progress */}
-      <Pressable onPress={goPractice} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
+      <Pressable onPress={goExplore} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
         <ProgressRing fraction={fraction} />
         <View style={styles.flex}>
           <View style={styles.rowBetween}>
@@ -93,75 +88,39 @@ export default function HomeScreen() {
         <Ionicons name="chevron-forward" size={18} color={colors.muted} />
       </Pressable>
 
-      {/* Continue: the newest dance from Supabase, or the sample lesson until there is one */}
-      {latest ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Open ${latest.title}`}
-          onPress={() => openDance(latest.id)}
-          style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}
-        >
-          <View style={styles.thumb}>
-            <DanceImage dance={latest} />
-            <View style={styles.thumbShade} />
-            <View style={styles.playBadge}>
-              <Ionicons name="play" size={16} color={colors.onPrimary} />
-            </View>
-            <Text style={styles.duration}>{formatClock(latest.duration_ms)}</Text>
+      {/* Continue: Kaitlyn's sample lesson. Saved dances are listed in the Explore tab. */}
+      <Pressable accessibilityRole="button" accessibilityLabel={`Learn ${sampleLesson.title}`} onPress={openLesson} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
+        <View style={styles.thumb}>
+          <Image source={sampleLesson.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <View style={styles.thumbShade} />
+          <View style={styles.playBadge}>
+            <Ionicons name="play" size={16} color={colors.onPrimary} />
           </View>
-          <View style={styles.flex}>
-            <Text style={styles.cardTitle} numberOfLines={2}>
-              {latest.title}
-            </Text>
-            <Text style={styles.caption}>
-              {latest.steps_completed ?? 0} of {latest.step_count} {latest.step_count === 1 ? 'step' : 'steps'} mastered
-              {latest.mine ? '' : ' · Shared'}
-            </Text>
-            <View style={styles.track}>
-              <View
-                style={[
-                  styles.trackFill,
-                  { width: `${latest.step_count ? ((latest.steps_completed ?? 0) / latest.step_count) * 100 : 0}%` },
-                ]}
-              />
-            </View>
+          <Text style={styles.duration}>{continueWatching.durationLabel}</Text>
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>{sampleLesson.title}</Text>
+          <Text style={styles.caption}>
+            {sampleLesson.style} · {sampleLesson.steps} steps
+          </Text>
+          <View style={styles.track}>
+            <View style={[styles.trackFill, { width: `${continueWatching.fractionDone * 100}%` }]} />
           </View>
-          <Ionicons name="chevron-forward" size={18} color={colors.muted} />
-        </Pressable>
-      ) : (
-        <Pressable accessibilityRole="button" accessibilityLabel={`Learn ${sampleLesson.title}`} onPress={openLesson} style={({ pressed }) => [styles.card, styles.row, pressed && styles.pressed]}>
-          <View style={styles.thumb}>
-            <Image source={sampleLesson.image} style={StyleSheet.absoluteFill} resizeMode="cover" />
-            <View style={styles.thumbShade} />
-            <View style={styles.playBadge}>
-              <Ionicons name="play" size={16} color={colors.onPrimary} />
-            </View>
-            <Text style={styles.duration}>{continueWatching.durationLabel}</Text>
-          </View>
-          <View style={styles.flex}>
-            <Text style={styles.cardTitle}>{sampleLesson.title}</Text>
-            <Text style={styles.caption}>
-              {sampleLesson.style} · {sampleLesson.steps} steps
-            </Text>
-            <View style={styles.track}>
-              <View style={[styles.trackFill, { width: `${continueWatching.fractionDone * 100}%` }]} />
-            </View>
-          </View>
-          <Ionicons name="chevron-forward" size={18} color={colors.muted} />
-        </Pressable>
-      )}
+        </View>
+        <Ionicons name="chevron-forward" size={18} color={colors.muted} />
+      </Pressable>
 
       {/* Lessons; every dance is listed in the Explore tab */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.routines}>
         <Pressable accessibilityRole="button" accessibilityLabel={`Learn ${sampleLesson.title}`} onPress={openLesson} style={styles.routine}>
-          <View style={[styles.routineImageWrap, !latest && styles.routineSelected]}>
+          <View style={[styles.routineImageWrap, styles.routineSelected]}>
             <Image source={sampleLesson.image} style={styles.routineImage} resizeMode="cover" />
           </View>
           <Text style={styles.routineLabel} numberOfLines={1}>
             {sampleLesson.title}
           </Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="All dances" onPress={() => router.navigate('/explore')} style={styles.routine}>
+        <Pressable accessibilityRole="button" accessibilityLabel="All dances" onPress={goExplore} style={styles.routine}>
           <View style={[styles.routineImageWrap, styles.addTile]}>
             <Ionicons name="albums-outline" size={28} color={colors.text} />
           </View>

@@ -42,7 +42,6 @@ function RootStack() {
           <Stack.Screen name="dance/[id]/index" options={{ headerShown: false }} />
           <Stack.Screen name="dance/[id]/edit" options={{ headerShown: false }} />
           <Stack.Screen name="step-recording" options={{ headerShown: false }} />
-          <Stack.Screen name="results" options={{ title: 'Feedback' }} />
           <Stack.Screen
             name="youtube"
             options={{

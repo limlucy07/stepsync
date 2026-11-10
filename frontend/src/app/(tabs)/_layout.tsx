@@ -46,17 +46,6 @@ export default function TabsLayout() {
     >
       <Tabs.Screen name="index" options={{ title: 'Home', tabBarIcon: tabIcon('home', 'home-outline') }} />
       <Tabs.Screen name="explore" options={{ title: 'Explore', tabBarIcon: tabIcon('search', 'search-outline') }} />
-      <Tabs.Screen
-        name="practice"
-        options={{
-          title: 'Practice',
-          tabBarIcon: tabIcon('musical-notes', 'musical-notes-outline'),
-          headerShown: true,
-          headerStyle: { backgroundColor: colors.background },
-          headerTintColor: colors.text,
-          headerShadowVisible: false,
-        }}
-      />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: tabIcon('person', 'person-outline') }} />
     </Tabs>
   );

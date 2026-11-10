@@ -16,8 +16,7 @@ type Phase = 'starting' | 'idle' | 'countdown' | 'recording' | 'failed';
 /**
  * Browser version of the camera screen (record.tsx is the phone version): films with the computer's
  * webcam using getUserMedia and MediaRecorder. Same params and result as the phone version:
- *   ?slot=reference|practice        sets the Practice tab's reference or practice video
- *   ?step=N&key=…&clip=…            a step recording, with the step's clip shown above the camera
+ *   ?slot=practice&step=N&key=…&clip=…   a step recording, with the step's clip shown above the camera
  * Browsers only allow the camera on localhost or HTTPS.
  */
 export default function RecordScreen() {
@@ -154,7 +153,7 @@ export default function RecordScreen() {
 
   function close() {
     if (router.canGoBack()) router.back();
-    else router.replace('/practice');
+    else router.replace('/');
   }
 
   function onShutter() {
